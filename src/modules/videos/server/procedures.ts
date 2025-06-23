@@ -1,14 +1,60 @@
 import { z } from "zod";
-import { and, eq, getTableColumns, inArray, isNotNull } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { UTApi } from "uploadthing/server";
+import { and, eq, getTableColumns, inArray, isNotNull } from "drizzle-orm";
 
 import { db } from "@/db";
 import { mux } from "@/lib/mux";
-import { subscriptions, users, videoReactions, videos, videoUpdateSchema, videoViews } from "@/db/schema";
 import { baseProcedure, createTRPCRouter, protectedProcedure } from "@/trpc/init";
+import { subscriptions, users, videoReactions, videos, videoUpdateSchema, videoViews } from "@/db/schema";
 
 export const videosRouter = createTRPCRouter({
+  revalidate: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async ({ ctx, input }) => {
+    const { id: userId } = ctx.user;
+
+    const [existingVideo] = await db
+      .select()
+      .from(videos)
+      .where(and(eq(videos.id, input.id), eq(videos.userId, userId)));
+
+    if (!existingVideo) {
+      throw new TRPCError({ code: "NOT_FOUND" });
+    }
+
+    if (!existingVideo.muxUploadId) {
+      throw new TRPCError({ code: "BAD_REQUEST" });
+    }
+
+    const upload = await mux.video.uploads.retrieve(existingVideo.muxUploadId);
+
+    if (!upload || !upload.asset_id) {
+      throw new TRPCError({ code: "BAD_REQUEST" });
+    }
+
+    const asset = await mux.video.assets.retrieve(upload.asset_id);
+
+    if (!asset) {
+      throw new TRPCError({ code: "BAD_REQUEST" });
+    }
+
+    const playbackId = asset.playback_ids?.[0].id;
+    const duration = asset.duration ? Math.round(asset.duration * 1000) : 0;
+
+    // TODO: Potentially find a way to revalidate trackId and trackStatus as well
+
+    const [updatedVideo] = await db
+      .update(videos)
+      .set({
+        muxStatus: asset.status,
+        muxPlaybackId: playbackId,
+        muxAssetId: asset.id,
+        duration,
+      })
+      .where(and(eq(videos.id, input.id), eq(videos.userId, userId)))
+      .returning();
+
+    return updatedVideo;
+  }),
   restoreThumbnail: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async ({ ctx, input }) => {
     const { id: userId } = ctx.user;
 
@@ -150,14 +196,14 @@ export const videosRouter = createTRPCRouter({
           type: videoReactions.type,
         })
         .from(videoReactions)
-        .where(inArray(videoReactions.userId, userId ? [userId] : []))
+        .where(inArray(videoReactions.userId, userId ? [userId] : [])),
     );
 
     const viewerSubscriptions = db.$with("viewer_subscriptions").as(
       db
         .select()
         .from(subscriptions)
-        .where(inArray(subscriptions.viewerId, userId ? [userId] : []))
+        .where(inArray(subscriptions.viewerId, userId ? [userId] : [])),
     );
 
     const [existingVideo] = await db
@@ -172,11 +218,11 @@ export const videosRouter = createTRPCRouter({
         viewCount: db.$count(videoViews, eq(videoViews.videoId, videos.id)),
         likeCount: db.$count(
           videoReactions,
-          and(eq(videoReactions.videoId, videos.id), eq(videoReactions.type, "like"))
+          and(eq(videoReactions.videoId, videos.id), eq(videoReactions.type, "like")),
         ),
         dislikeCount: db.$count(
           videoReactions,
-          and(eq(videoReactions.videoId, videos.id), eq(videoReactions.type, "dislike"))
+          and(eq(videoReactions.videoId, videos.id), eq(videoReactions.type, "dislike")),
         ),
         viewerReaction: viewerReactions.type,
       })
