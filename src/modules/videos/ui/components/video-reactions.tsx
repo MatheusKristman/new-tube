@@ -15,7 +15,6 @@ interface VideoReactionsProps {
   viewerReaction: VideoGetOneOutput["viewerReaction"];
 }
 
-// TODO: properly implement the reactions
 export const VideoReactions = ({ videoId, likes, dislikes, viewerReaction }: VideoReactionsProps) => {
   const clerk = useClerk();
   const utils = trpc.useUtils();
